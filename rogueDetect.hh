@@ -42,9 +42,11 @@ public:
 
 	List_member<station> link;
 	Vector<int> past_packets;
+	Vector<int> past_beacons;
 
-	double ave, ema, var, var_sh, stddev; 
-	int flag, first_run, pps, beacon_rate, rssi;
+	double ave, ema, var, var_sh, stddev, beacon_ave; 
+	int flag, first_run, pps, beacon_rate, rssi, var_sh_flag;
+	int beacon_attack, var_attack_high, var_attack_low;			// attack flags
 	uint16_t beacon_int;
 
 	ewma_type _size;
@@ -62,8 +64,10 @@ public:
   void push (int port, Packet *);
   void run_timer (Timer *);
   void print_stations (StationList &l);
+  void cleanup (StationList &l);
   void getStats (StationList &l);
   void getAverage (station &, int);
+  void getBeaconAverage (station &, int);
   void getEWMA (station &);
   void getVariance (station &, int);
   void getVarianceAlt (station &, int);
