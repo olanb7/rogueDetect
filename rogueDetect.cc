@@ -242,7 +242,7 @@ void RogueDetect::keepTrack(station &sta){
 void
 RogueDetect::push(int, Packet *p) {
 
-	StringAccum log, beac_sa;
+	StringAccum log, dir;
 
 	struct click_wifi *w = (struct click_wifi *) p->data();
 	struct click_wifi_extra *ceh = WIFI_EXTRA_ANNO(p);
@@ -250,8 +250,10 @@ RogueDetect::push(int, Packet *p) {
 
 	int type = w->i_fc[0] & WIFI_FC0_TYPE_MASK;
 	int subtype = w->i_fc[0] & WIFI_FC0_SUBTYPE_MASK;
-	int is_mgmt = 0, is_beacon = 0, not_probe_rq = 0, is_data = 0;
+	int is_mgmt = 0, is_beacon = 0,  is_data = 0;
+	int not_probe_rq = 1, not_tods = 1, not_ctrl = 1; 	// things we don't want to look at
 	uint8_t *ptr;
+	
 
 
 	// Check DS Status
@@ -261,21 +263,27 @@ RogueDetect::push(int, Packet *p) {
 			//dst = EtherAddress(w->i_addr1);
 			//src = EtherAddress(w->i_addr2);
 			sta->mac = new EtherAddress(w->i_addr3);
+			dir << "NoDS  ";
 			break;
 		case WIFI_FC1_DIR_TODS:
-			sta->mac = new EtherAddress(w->i_addr1);
+			
+			sta->mac = new EtherAddress(w->i_addr1);	// not interested in ToDS
 			//src = EtherAddress(w->i_addr2);
 			//dst = EtherAddress(w->i_addr3);
+			dir << "ToDS  ";
+			not_tods = 0;
 			break;
 		case WIFI_FC1_DIR_FROMDS:
 			//dst = EtherAddress(w->i_addr1);
 			sta->mac = new EtherAddress(w->i_addr2);
 			//src = EtherAddress(w->i_addr3);
+			dir << "FromDS";
 			break;
 		case WIFI_FC1_DIR_DSTODS:
 			//dst = EtherAddress(w->i_addr1);
 			//src = EtherAddress(w->i_addr2);
 			sta->mac = new EtherAddress(w->i_addr3);
+			dir << "DStoDS";
 			break;
 		default:
 			click_chatter(" ??? ");
@@ -291,25 +299,28 @@ RogueDetect::push(int, Packet *p) {
 			// get beacon interval (ms)
 			ptr = ( (uint8_t *) (w+1) ) + 8;
   			sta->beacon_int = le16_to_cpu(*(uint16_t *) ptr);
-			click_chatter("beacon rssi = %d", ceh->rssi);
+			//click_chatter("%s| %s | beacon rssi = %d", sta->mac->unparse_colon().c_str(), dir.c_str(), ceh->rssi);
 		}
 		else {
 			if(!sta->beacon_int) {
 				sta->beacon_int = 0;
 			}
-			click_chatter("mgmt rssi = %d", ceh->rssi);
+			//click_chatter("%s| %s | mgmt rssi = %d", sta->mac->unparse_colon().c_str(), dir.c_str(), ceh->rssi);
 		}
-		if (subtype != WIFI_FC0_SUBTYPE_PROBE_REQ)
-			not_probe_rq = 1;
+		if (subtype == WIFI_FC0_SUBTYPE_PROBE_REQ)
+			not_probe_rq = 0;
 	}
 	else if (type == WIFI_FC0_TYPE_DATA) {
 		is_data = 1;
-		click_chatter("data rssi = %d", ceh->rssi);
+		//click_chatter("%s| %s | data rssi = %d", sta->mac->unparse_colon().c_str(), dir.c_str(), ceh->rssi);
 
+	} 
+	else if (type == WIFI_FC0_TYPE_CTL) {
+		not_ctrl = 0;
 	}
 
 	// interrogate packets
-	if (is_beacon || is_data) {
+	if (not_tods && not_ctrl && not_probe_rq) {
 
 		// get rssi
 		sta->rssi = ceh->rssi;
