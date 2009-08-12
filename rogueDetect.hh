@@ -63,14 +63,14 @@ public:
   
   void push (int port, Packet *);
   void run_timer (Timer *);
-  void print_stations (StationList &l);
+  void printStations (StationList &l);
   void cleanup (StationList &l);
   void getStats (StationList &l);
   void getAverage (station &, int);
   void getBeaconAverage (station &, int);
   void getEWMA (station &);
   void getVariance (station &, int);
-  void getVarianceAlt (station &, int);
+  void getShortVariance (station &, int);
   int  initialize (ErrorHandler *);
   void keepTrack (station &);
   void logOutput (station &, StringAccum);

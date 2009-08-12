@@ -43,29 +43,49 @@ RogueDetect::initialize (ErrorHandler *) {
 	return 0;
 }
 
-void RogueDetect::print_stations(StationList &l) {
+void RogueDetect::run_timer(Timer *) {
+
+	getStats(_sta_list);
+	printStations(_sta_list);
+	cleanup(_sta_list);
+
+	_timer.schedule_after_msec(1000);
+}
+
+void RogueDetect::cleanup (StationList &l) {
+
+	for (StationList::iterator sta = l.begin(); sta != l.end(); ++sta) {
+
+		sta->flag = 1;
+		sta->var_sh_flag = 0;
+	}
+}
+
+void RogueDetect::printStations(StationList &l) {
+	
 	size_t n = 0;
 	StringAccum sa, head;
 
 	Timestamp now = Timestamp::now();
-	system("clear");
+	//system("clear");
 
 	if (show_debug)
 		click_chatter("%s", debug.take_string().c_str());
 
-	head << "\nNo.\tMAC              \tBeacons\tRSSI\tLast Packet\tEWMA  \tVariance\n";
-	head <<   "---\t-----------------\t-------\t----\t-----------\t------\t--------\n";
+	head << "\nNo.\tMAC              \tBeacons\tRSSI\tLast Packet\tEWMA  \t Variance (l & s) \n";
+	head <<   "---\t-----------------\t-------\t----\t-----------\t------\t -----------------\n";
 	click_chatter("%s", head.c_str());
 
 	for (StationList::iterator sta = l.begin(); sta != l.end(); ++sta, ++n) {
+		
 		Timestamp diff = now;
 		diff -= *sta->time;
-		if (diff > 90) {
-			// forget if not seen in 90 secs
+		
+		if (diff > 90) {			// forget if not seen in 90 secs
 			l.erase(sta);
 			sa << "bye bye " << sta->mac->unparse_colon().c_str() << "\n";
 		}
-		else {
+		else {					// else print stats
 			int len;
 			len = sprintf(sa.reserve(3), "%3d", n);
 			sa.adjust_length(len);
@@ -84,43 +104,23 @@ void RogueDetect::print_stations(StationList &l) {
 			else { 	
 				sa << "\t \e[31m  " << diff << "\e[0m"; }
 
-			sa.reserve(12);
-			sa << "\t" << sta->_size.unparse();
+			sa << "\t" << sta->_size.unparse() << " ";
 
-			len = sprintf(sa.reserve(12), "\t%05.3f", sta->var);
-			sa.adjust_length(len);
-			
-			len = sprintf(sa.reserve(12), "\t%05.3f", sta->var_sh);
+			len = sprintf(sa.reserve(9), "\t%-4.01f", sta->var);
 			sa.adjust_length(len);
 
+			len = sprintf(sa.reserve(9), "\t%-4.01f ", sta->var_sh);
+			sa.adjust_length(len);
 
+			sa << "\t";
+		
 			// attack detector
-			/*if(sta->var_attack == 1) {
-				sa << " Possible Attack ";
-				if (sta->beacon_attack)
-					sa << " and increased beacon rate ( var:" << sta->var << ", beacons" << sta->beacon_rate << " )";
-			}
-			else if (sta->var_attack == 2) {
-				sa << " Probable Attack ";
-				if (sta->beacon_attack)
-					sa << " and increased beacon rate ( var:" << sta->var << ", beacons" << sta->beacon_rate << " )";
-			}
-			else if (sta->var_attack > 2) {
-				sa << "\t \e[31m High Variance";
-				if (sta->beacon_attack > 2)
-					sa << " and consistently high beacon rate ( var:" << sta->var << ", beacons" << sta->beacon_rate << " )";
-				else if (sta->beacon_attack)
-					sa << " and increased beacon rate ( var:" << sta->var << ", beacons" << sta->beacon_rate << " )";
-				sa << "\e[0m";
-			}*/
-
-			if ( (sta->var_attack_high > 1) && (sta->beacon_attack > 1) )
-				sa << "\t\t\e[31mLikely Attack\e[0m ( var:" << sta->var << ", beacons:" << sta->beacon_ave << " )";
-			else if ( (sta->var_attack_low > 3) && (sta->beacon_attack > 1) )
-				sa << "\t\t\e[31mPossible Attack\e[0m ( var:" << sta->var << ", beacons:" << sta->beacon_ave << " )";
-			else if ( (sta->var_sh_flag == 1) && (sta->beacon_attack >= 1) )
-				sa << "\t\t\e[31mLooks like an attack is starting\e[0m ( var:" << sta->var_sh << ", beacons:" << sta->beacon_ave << " )";
-
+			if ( (sta->var_attack_high >= 2) && (sta->beacon_attack > 1) )			// long variance over 20 for two or more seconds and beacon rate above normal (strong attack)
+				sa << "\e[31mLikely Attack\e[0m (var:" << sta->var << ", beacons:" << sta->beacon_ave << ")";
+			else if ( (sta->var_attack_low >= 2) && (sta->beacon_attack > 1) )		// long variance over 10 for two or more seconds and beacon rate above normal   (weak attack)
+				sa << "\e[31mPossible Attack\e[0m (var:" << sta->var << ", beacons:" << sta->beacon_ave << ")";
+			else if ( (sta->var_sh_flag == 1) && (sta->beacon_attack >= 1) )		// spike in short variance in last second and beacon rate above normal
+				sa << "\e[31mLooks like an attack is starting\e[0m (var_sh:" << sta->var_sh << ", beacons:" << sta->beacon_ave << ")";
 
 			sa << "\n";
 		}		
@@ -141,23 +141,7 @@ RogueDetect::lookup(station &chksta, StationList &l) {
 	return (struct station*)NULL;
 }
 
-void RogueDetect::run_timer(Timer *) {
 
-	getStats(_sta_list);
-	print_stations(_sta_list);
-	cleanup(_sta_list);
-	_timer.schedule_after_msec(1000);
-}
-
-void RogueDetect::cleanup (StationList &l) {
-
-	for (StationList::iterator sta = l.begin(); sta != l.end(); ++sta) {
-
-		sta->beacon_rate = 0;
-		sta->flag = 1;
-		sta->var_sh_flag = 0;
-	}
-}
 
 void RogueDetect::getStats (StationList &l) {
 
@@ -215,30 +199,6 @@ void RogueDetect::getStats (StationList &l) {
 
 }
 
-void RogueDetect::getBeaconAverage(station &sta, int samples) {
-
-	sta.beacon_ave = 0;
-	if (sta.past_beacons.size() < samples)
-		samples = sta.past_beacons.size();
-
-	int start = sta.past_beacons.size() - samples;
-
-	debug << "\ngetBeaconAverage: ";
-
-	if (!sta.past_beacons.empty()) {
-		for(int i = start; i < sta.past_beacons.size(); i++) {
-			debug << sta.past_beacons.at(i) << " + ";
-			sta.beacon_ave += sta.past_beacons.at(i);
-		}
-		sta.beacon_ave = sta.beacon_ave / samples;
-	}
-	else {
-		sta.beacon_ave = sta.beacon_rate;
-	}
-	debug << " -> BeaconAverage = " << sta.beacon_ave;
-}
-
-
 void RogueDetect::getAverage(station &sta, int samples) {
 
 	sta.ave = 0;
@@ -260,6 +220,29 @@ void RogueDetect::getAverage(station &sta, int samples) {
 		sta.ave = 0;
 	}
 	debug << " -> average = " << sta.ave;
+}
+
+void RogueDetect::getBeaconAverage(station &sta, int samples) {
+
+	sta.beacon_ave = 0;
+	if (sta.past_beacons.size() < samples)
+		samples = sta.past_beacons.size();
+
+	int start = sta.past_beacons.size() - samples;
+
+	debug << "\ngetBeaconAverage: ";
+
+	if (!sta.past_beacons.empty()) {
+		for(int i = start; i < sta.past_beacons.size(); i++) {
+			debug << sta.past_beacons.at(i) << " + ";
+			sta.beacon_ave += sta.past_beacons.at(i);
+		}
+		sta.beacon_ave = sta.beacon_ave / samples;
+	}
+	else {
+		sta.beacon_ave = sta.beacon_rate;
+	}
+	debug << " -> BeaconAverage = " << sta.beacon_ave;
 }
 
 void RogueDetect::getVariance(station &sta, int samples) {
@@ -285,7 +268,7 @@ void RogueDetect::getVariance(station &sta, int samples) {
 
 }
 
-void RogueDetect::getVarianceAlt(station &sta, int samples) {
+void RogueDetect::getShortVariance(station &sta, int samples) {
 
 	sta.var_sh = 0;
 	if (sta.past_packets.size() < samples)
@@ -293,11 +276,13 @@ void RogueDetect::getVarianceAlt(station &sta, int samples) {
 
 	int start = sta.past_packets.size() - samples;
 
+	if (int(sta.ave) == 0) { 
+		sta.ave = sta.past_packets.at(start);
+	}
 
 	if (!sta.past_packets.empty()) {
 		for(int j = start; j < sta.past_packets.size(); j++) {
 			sta.var_sh += (sta.past_packets.at(j) - sta.ave) * (sta.past_packets.at(j) - sta.ave);
-			debug << sta.var_sh << ", ";
 		}
 		sta.var_sh = sta.var_sh / samples;
 	}
@@ -356,28 +341,19 @@ RogueDetect::push(int, Packet *p) {
 
 	switch (w->i_fc[1] & WIFI_FC1_DIR_MASK) {
 		case WIFI_FC1_DIR_NODS:
-			//dst = EtherAddress(w->i_addr1);
-			//src = EtherAddress(w->i_addr2);
 			sta->mac = new EtherAddress(w->i_addr3);
 			dir << "NoDS  ";
 			break;
 		case WIFI_FC1_DIR_TODS:
-			
 			sta->mac = new EtherAddress(w->i_addr1);	// not interested in ToDS
-			//src = EtherAddress(w->i_addr2);
-			//dst = EtherAddress(w->i_addr3);
 			dir << "ToDS  ";
 			not_tods = 0;
 			break;
 		case WIFI_FC1_DIR_FROMDS:
-			//dst = EtherAddress(w->i_addr1);
 			sta->mac = new EtherAddress(w->i_addr2);
-			//src = EtherAddress(w->i_addr3);
 			dir << "FromDS";
 			break;
 		case WIFI_FC1_DIR_DSTODS:
-			//dst = EtherAddress(w->i_addr1);
-			//src = EtherAddress(w->i_addr2);
 			sta->mac = new EtherAddress(w->i_addr3);
 			dir << "DStoDS";
 			break;
@@ -398,13 +374,12 @@ RogueDetect::push(int, Packet *p) {
 			switch (subtype) {
 				case WIFI_FC0_SUBTYPE_BEACON:
 					is_beacon = 1;
-
+					
 					// get beacon interval (ms)
 					ptr = ( (uint8_t *) (w+1) ) + 8;
 					sta->beacon_int = le16_to_cpu(*(uint16_t *) ptr);
 
-					
-				
+											
 				case WIFI_FC0_SUBTYPE_PROBE_REQ:
 					not_probe_rq = 0;
 				default:
@@ -424,60 +399,66 @@ RogueDetect::push(int, Packet *p) {
 		// get rssi
 		sta->rssi = ceh->rssi;
 		
-		if (_sta_list.empty()) {
-			// empty, so add sta
+		if (_sta_list.empty()) {		// empty, so add station
 
 			sta->time = new Timestamp(Timestamp::now());
 			sta->first_run = 1;
+			sta->var_sh = 0;
+
 			keepTrack(*sta);
-			if (is_beacon)
+			if (is_beacon) {
 				sta->beacon_rate = 1;
-			else
+			} else {
 				sta->beacon_rate = 0;
+			}
 
 			log << *sta->time << "\t";
-			log << sta->rssi << "\t";
+			log <<  sta->rssi << "\t";
+			log <<  sta->var_sh << "\t";
 
 			_sta_list.push_back(sta);
 		}
-		else {
-			// list not empty, so lookup
+		else {					// list not empty, so lookup
 			struct station *sta_dupe = lookup(*sta, _sta_list);
 			
-			// if list seen before
-			if (sta_dupe) {
+			if (sta_dupe) {				// if list seen before
 				sta_dupe->time->set_now();
 				sta_dupe->rssi = sta->rssi;
+
 				keepTrack(*sta_dupe);
-				if (is_beacon)
+				getShortVariance(*sta_dupe, 2);
+				if (is_beacon) 
 					sta_dupe->beacon_rate++;
-			
+
 				log << *sta_dupe->time	<< "\t";
 				log <<  sta_dupe->rssi	<< "\t";
+				log <<  sta_dupe->var_sh  << "\t";
 
-				getVarianceAlt(*sta_dupe, 2);
-				log << sta_dupe->var_sh  << "\t";
-				if (sta_dupe->flag == 1) {
+				if (sta_dupe->flag == 1) {	// once a sec print these
 
 					log << sta_dupe->var << "\t";
-					log << sta_dupe->_size.unparse()	<< "\t";
-					log << sta_dupe->beacon_rate	<< "\t";
+					log << sta_dupe->_size.unparse() << "\t";
+					log << sta_dupe->beacon_rate << "\t";
 					
+					sta_dupe->beacon_rate = 0;
 					sta_dupe->flag = 0;
 				}
 			}
-			// else if not seen before			
-			else {
+			else {					// else if not seen before
 				sta->time = new Timestamp(Timestamp::now());
 				sta->first_run = 1;
+				sta->var_sh = 0;
+
 				keepTrack(*sta);
-				if (is_beacon)
+				if (is_beacon) {
 					sta->beacon_rate = 1;
-				else
+				} else {
 					sta->beacon_rate = 0;
+				}
 
 				log << *sta->time << "\t";
-				log << sta->rssi << "\t";
+				log <<  sta->rssi << "\t";
+				log <<  sta->var_sh << "\t";				
 
 				_sta_list.push_back(sta);
 			}
@@ -489,8 +470,6 @@ RogueDetect::push(int, Packet *p) {
 		#if CLICK_USERLEVEL
 			logOutput(*sta, log);
 		#endif
-
-		//delete sta->mac;
 	}
 	output(0).push(p);
 }
