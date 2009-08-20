@@ -18,6 +18,8 @@
 #include <elements/wifi/wirelessinfo.hh>
 #include <click/list.hh>
 #include <click/error.hh>
+#include <click/crc32.h>
+#include <click/bighashmap.hh>
 #if CLICK_USERLEVEL
 # include <sys/time.h>
 # include <sys/resource.h>
@@ -37,20 +39,21 @@ public:
   typedef DirectEWMAX<FixedEWMAXParameters<3, 10, uint64_t, int64_t> > ewma_type;
 
   struct station {
-	EtherAddress *mac;
+	EtherAddress *mac, *dst, *src;
 	Timestamp *time;
 
 	List_member<station> link;
+
 	Vector<int> past_packets;
 	Vector<int> past_beacons;
 
-	double ave, ema, var, var_sh, stddev, beacon_ave; 
-	int flag, first_run, pps, beacon_rate, rssi, var_sh_flag;
-	int beacon_attack, var_attack_high, var_attack_low;			// attack flags
+	double ave, longVar, shortVar, beacon_ave;
+	int rssi, beacon_rate;
+	int flag, first_run;							// flags
+	int beacon_attack, var_attack_high, var_attack_low, shortVar_flag;	// attack flags
 	uint16_t beacon_int;
 
-	ewma_type _size;
-	ewma_type _sec_size;
+	ewma_type _ewma;
 	};
 
   
@@ -62,6 +65,9 @@ public:
   const char *processing() const	{ return PUSH; }
   
   void push (int port, Packet *);
+  int  initialize (ErrorHandler *);
+  void keepTrack (station &);
+  void logOutput (station &, StringAccum);
   void run_timer (Timer *);
   void printStations (StationList &l);
   void cleanup (StationList &l);
@@ -69,20 +75,17 @@ public:
   void getAverage (station &, int);
   void getBeaconAverage (station &, int);
   void getEWMA (station &);
-  void getVariance (station &, int);
+  void getLongVariance (station &, int);
   void getShortVariance (station &, int);
-  int  initialize (ErrorHandler *);
-  void keepTrack (station &);
-  void logOutput (station &, StringAccum);
+
+  
 
   RogueDetect::station * lookup(station &, StationList &);
   
-  Timer _timer;
+  Timer  _timer;
   String _filename;
-  FILE *_logfile; 
-  double alpha;
+  FILE  *_logfile; 
   StringAccum debug;
-  double k;  
 
 };
 CLICK_ENDDECLS
