@@ -49,10 +49,12 @@ public:
 
 	double ave, longVar, shortVar, beacon_ave;
 	int rssi, beacon_rate;
-	int flag, first_run;							// flags
+	int flag, first_run, seen;
+	int badcrc, goodcrc, salvaged;							// flags
 	int beacon_attack, var_attack_high, var_attack_low, shortVar_flag;	// attack flags
-	uint16_t beacon_int;
-
+	uint16_t beacon_int; 
+	uint32_t jitter;
+	u_int64_t mactime;
 	ewma_type _ewma;
 	};
 
@@ -86,6 +88,8 @@ public:
   String _filename;
   FILE  *_logfile; 
   StringAccum debug;
+
+  int badcrc, goodcrc, salvaged;
 
 };
 CLICK_ENDDECLS

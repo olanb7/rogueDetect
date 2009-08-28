@@ -25,6 +25,10 @@
 # include <unistd.h>
 #endif
 
+/*#include <click/glue.hh>
+#include <clicknet/radiotap.h>
+#include <clicknet/llc.h>
+*/
 #define show_debug 0		// output debug messages from getStats funcion
 #define window 100 		// define window size in packets
 
@@ -61,8 +65,13 @@ void RogueDetect::cleanup (StationList &l) {
 
 	for (StationList::iterator sta = l.begin(); sta != l.end(); ++sta) {
 
-		sta->flag = 1;
+		sta->flag = 0;
 		sta->shortVar_flag = 0;
+		sta->beacon_rate = 0;
+		sta->jitter = 0;
+		sta->salvaged = 0;
+		goodcrc = 0;
+		badcrc = 0;
 	}
 }
 
@@ -77,8 +86,8 @@ void RogueDetect::printStations(StationList &l) {
 	if (show_debug)
 		click_chatter("%s", debug.take_string().c_str());
 
-	head << "\nNo.\tMAC              \tBeacons\tRSSI\tLast Packet\tEWMA  \t Variance (l & s) \n";
-	head <<   "---\t-----------------\t-------\t----\t-----------\t------\t -----------------\n";
+	head << "\nNo.\tMAC              \tBeacons\tJitter\tRSSI\tLast Packet\tEWMA  \t Variance (l & s) \n";
+	head <<   "---\t-----------------\t-------\t------\t----\t-----------\t------\t -----------------\n";
 	click_chatter("%s", head.c_str());
 
 	for (StationList::iterator sta = l.begin(); sta != l.end(); ++sta, ++n) 	{
@@ -98,12 +107,18 @@ void RogueDetect::printStations(StationList &l) {
 			len = sprintf(sa.reserve(18), "\t%s", sta->mac->unparse_colon().c_str());
 			sa.adjust_length(len);
 
-			len = sprintf(sa.reserve(10), "\t%7d", sta->beacon_rate);
+			len = sprintf(sa.reserve(9), "\t%2d (%1d)", (sta->beacon_rate + sta->salvaged), sta->salvaged);
+			sa.adjust_length(len);
+
+			if (sta->beacon_rate == 0)
+				len = sprintf(sa.reserve(14), "n/a");
+			else
+				len = sprintf(sa.reserve(14), "\t%d us", (sta->jitter / sta->beacon_rate));
 			sa.adjust_length(len);
 
 			len = sprintf(sa.reserve(9), "\t%4d", sta->rssi);
 			sa.adjust_length(len);
-
+			
 			if (diff < 1) { 
 				sa << "\t \e[32m  " << diff << "\e[0m"; }
 			else { 	
@@ -122,17 +137,22 @@ void RogueDetect::printStations(StationList &l) {
 			// ATTACK DETECTOR
 			// long variance over 20 for two or more seconds and beacon rate above normal (strong attack)
 			if ( (sta->var_attack_high > 1) && (sta->beacon_attack > 1) )			
-				sa << "\e[31mLikely Attack\e[0m (var:" << sta->longVar << ", beacons:" << sta->beacon_ave << ")";
+				sa << "\e[31mLikely Attack\e[0m (var:" << sta->longVar << ", beacons:" << sta->beacon_ave << "[> 1000/" << sta->beacon_int << "] )";
 			// long variance over 10 for two or more seconds and beacon rate above normal   (weak attack)
 			else if ( (sta->var_attack_low > 1) && (sta->beacon_attack > 1) )		
-				sa << "\e[31mPossible Attack\e[0m (var:" << sta->longVar << ", beacons:" << sta->beacon_ave << ")";
+				sa << "\e[31mPossible Attack\e[0m (var:" << sta->longVar << ", beacons:" << sta->beacon_ave << "[> 1000/" << sta->beacon_int << "] )";
 			// spike in short variance in last second and beacon rate above normal
 			else if ( (sta->shortVar_flag == 1) && (sta->beacon_attack >= 1) )		
-				sa << "\e[31mLooks like an attack is starting\e[0m (shortVar:" << sta->shortVar << ", beacons:" << sta->beacon_ave << ")";
-
+				sa << "\e[31mLooks like an attack is starting\e[0m (shortVar:" << sta->shortVar << ", beacons:" << "[> 1000/" << sta->beacon_int << "] )";
+			
 			sa << "\n";
-		}		
+			}		
 	}
+	int total = badcrc + goodcrc;
+	double fer = (double) badcrc / (double) total;
+	int len;
+	len = sprintf(sa.reserve(20), "\nFER: %d / %d = %lf", badcrc, total, fer);
+	sa.adjust_length(len);
 	click_chatter("%s", sa.c_str());
 }
 
@@ -152,8 +172,12 @@ RogueDetect::lookup(station &chksta, StationList &l) {
 
 
 void RogueDetect::getStats (StationList &l) {
-
+	
+	int error = 1; // beacon per second error
+	
 	for (StationList::iterator sta = l.begin(); sta != l.end(); ++sta) {
+
+		sta->flag = 1;
 
 		debug << "\n" << sta->mac->unparse().c_str();
 		getAverage(*sta, 100);
@@ -168,12 +192,8 @@ void RogueDetect::getStats (StationList &l) {
 
 		getBeaconAverage(*sta, 3);
 
-		// malformed beacon recovery
-		//if ()
-
-
 		// beacon rate attack detector
-		if ( sta->beacon_ave > (1000 / sta->beacon_int) ) {
+		if ( sta->beacon_ave > ( int(1000/sta->beacon_int) + error )) {
 			if (sta->beacon_attack >= 1)
 				sta->beacon_attack++;
 			else
@@ -337,99 +357,152 @@ RogueDetect::push(int, Packet *p) {
 	StringAccum log, dir;
 
 	struct click_wifi *w = (struct click_wifi *) p->data();
-	struct click_wifi_extra *ceh = WIFI_EXTRA_ANNO(p);
-	//struct click_wifi_extra *cehp = (struct click_wifi_extra *) p->data();
+	struct click_wifi_extra *ceha = WIFI_EXTRA_ANNO(p);
 
 	struct station *sta = new station;
+		
+	int is_beacon = 0,  is_data = 0, salvageable = 0;
+	uint8_t *ptr;
 
 	int type = w->i_fc[0] & WIFI_FC0_TYPE_MASK;
 	int subtype = w->i_fc[0] & WIFI_FC0_SUBTYPE_MASK;
-	int is_mgmt = 0, is_beacon = 0,  is_data = 0;
-	int not_probe_rq = 1, not_tods = 1, not_ctrl = 1; 	// things we don't want to look at
-	uint8_t *ptr;
+	int failed_crc = 0;	
+
+	// Check failed errors
+
+	if (ceha->flags & WIFI_EXTRA_RX_MORE) {				// No CRC		
+		failed_crc = 1;
+		badcrc++;
+		p->kill();
+		goto end;
+	} else {
+		if (ceha->flags & WIFI_EXTRA_RX_ERR) {			// Failed CRC
+			if (subtype ==  WIFI_FC0_SUBTYPE_BEACON) {	// try save packet
+				salvageable = 1;				
+			} else {
+				failed_crc = 1;
+				badcrc++;
+				p->kill();
+				goto end;
+			}	
+		} else {
+			goodcrc++;
+		}
+	}
 
 	// Check DS Status
 
 	switch (w->i_fc[1] & WIFI_FC1_DIR_MASK) {
 		case WIFI_FC1_DIR_NODS:
 			sta->dst = new EtherAddress(w->i_addr1);
-    		sta->src = new EtherAddress(w->i_addr2);
+			sta->src = new EtherAddress(w->i_addr2);
 			sta->mac = new EtherAddress(w->i_addr3);
 			dir << "NoDS  ";
 			break;
-		case WIFI_FC1_DIR_TODS:
+		/*case WIFI_FC1_DIR_TODS:
 			sta->mac = new EtherAddress(w->i_addr1);	// not interested in ToDS
-			sta->dst = new EtherAddress(w->i_addr1);
-    			sta->src = new EtherAddress(w->i_addr2);
+			sta->dst = new EtherAddress(w->i_addr1);	// as gives bad results
+			sta->src = new EtherAddress(w->i_addr2);	// using two wireless cards 
 			dir << "ToDS  ";
-			not_tods = 0;
-			break;
+			break;*/
 		case WIFI_FC1_DIR_FROMDS:
 			sta->mac = new EtherAddress(w->i_addr2);
 			sta->dst = new EtherAddress(w->i_addr1);
-    			sta->src = new EtherAddress(w->i_addr2);
+			sta->src = new EtherAddress(w->i_addr2);
 			dir << "FromDS";
 			break;
 		case WIFI_FC1_DIR_DSTODS:
 			sta->mac = new EtherAddress(w->i_addr3);
 			sta->dst = new EtherAddress(w->i_addr1);
-    			sta->src = new EtherAddress(w->i_addr2);
+			sta->src = new EtherAddress(w->i_addr2);
 			dir << "DStoDS";
 			break;
 		default:
-			click_chatter(" ??? ");
+			goto push;
 	}
 
-	if (p->length() >= sizeof(click_wifi)) {
-		//uint16_t seq = le16_to_cpu(*(u_int16_t *)w->i_seq) >> WIFI_SEQ_SEQ_SHIFT;
-		uint8_t frag = le16_to_cpu(*(u_int16_t *)w->i_seq) & WIFI_SEQ_FRAG_MASK;
-		//click_chatter("%s | sequence: %d\t", duplicate->mac->unparse().c_str(), (int) seq);
-		if (frag || w->i_fc[1] & WIFI_FC1_MORE_FRAG) {
-			click_chatter("%s | fragment: %d", sta->mac->unparse().c_str(), (int) frag);
-			goto end;
+	if (salvageable) {
+		struct station *saved = lookup(*sta, _sta_list);
+		if (saved) {
+			saved->salvaged++;					// only taking beacon rate
+			//salvaged++;
+		} else {
+			// beacon unsalvageable
 		}
+		p->kill();
+		goto end;
 	}
-  
-	struct station *duplicate = lookup(*sta, _sta_list);
 
-	// If beacon, increment beason rate
-	
-	switch (type) {
+		
+	switch (type) {								
 		case WIFI_FC0_TYPE_DATA:
-			is_data = 1; 
-		case WIFI_FC0_TYPE_CTL:
-			not_ctrl = 0;
+			is_data = 1;
+			break;
 		case WIFI_FC0_TYPE_MGT:
-			is_mgmt = 1;
+			if (subtype == WIFI_FC0_SUBTYPE_BEACON) {
+				if (sta->dst->is_broadcast()) {
+					is_beacon = 1;	
 
-			switch (subtype) {
-				case WIFI_FC0_SUBTYPE_BEACON:
-					if (duplicate && sta->dst->is_broadcast()) {
-						is_beacon = 1;
-						// get beacon interval (ms)
-						ptr = ( (uint8_t *) (w+1) ) + 8;
-						sta->beacon_int = le16_to_cpu(*(uint16_t *) ptr);
-					}																
-				case WIFI_FC0_SUBTYPE_PROBE_REQ:
-					not_probe_rq = 0;
-				default:
-					if(!sta->beacon_int) {
-						sta->beacon_int = 0;
-					}
-			}	
+					ptr = ( (uint8_t *) (w+1) ) + 8;	// get beacon interval (ms)
+					sta->beacon_int = le16_to_cpu(*(uint16_t *) ptr);	
+				}
+			} else {
+				goto push;
+			}
+			break;
+		default:
+			goto push; // pass through other types
 	}
 
 	if(!sta->beacon_int) {
 		sta->beacon_int = 0;
 	}
 
-	// interrogate packets
-	if (not_tods && not_ctrl && is_beacon) {		// superfluous commands, kept for clarity
+	// interrogate packets	
+	sta->rssi = ceha->rssi;						// get rssi
+	if (sta->rssi > 200)						// check for negative SNR | bug?
+		sta->rssi = 0;
 
-		// get rssi
-		sta->rssi = ceh->rssi;
-		
-		if (_sta_list.empty() && is_beacon) {		// empty, so add station
+	if (!_sta_list.empty()) {					// list not empty, so lookup
+		struct station *duplicate = lookup(*sta, _sta_list);
+		if (duplicate) {					// if list seen before
+			
+			duplicate->time->set_now();
+			duplicate->rssi = sta->rssi;
+
+			keepTrack(*duplicate);
+			getShortVariance(*duplicate, 2);
+			if (is_beacon) {
+				duplicate->beacon_rate++;
+				if (duplicate->mactime) {		// beacon jitter check 
+					uint32_t jitter = (ceha->tsft - duplicate->mactime) % 102400;
+					if (jitter > 51200)
+						jitter = 102400 - jitter;
+					duplicate->jitter += jitter;
+				}
+				duplicate->mactime = (u_int64_t) ceha->tsft;
+			}
+
+			if (duplicate->rssi > 50) {
+				click_chatter("High RSSI %s: %d", \
+						duplicate->mac->unparse_colon().c_str(), duplicate->rssi);
+			}
+
+			log << *duplicate->time	<< "\t";
+			log <<  duplicate->rssi	<< "\t";
+			log <<  duplicate->shortVar  << "\t";
+
+			if (duplicate->flag == 1) {			// once a sec print these
+
+				log << duplicate->longVar << "\t";
+				log << duplicate->_ewma.unparse() << "\t";
+				log << duplicate->beacon_rate << "\t";
+			}
+		}
+		else {
+
+			sta->salvaged = 0;
+			sta->jitter = 0;			
 
 			sta->time = new Timestamp(Timestamp::now());
 			sta->first_run = 1;
@@ -437,73 +510,53 @@ RogueDetect::push(int, Packet *p) {
 
 			keepTrack(*sta);
 			if (is_beacon) {
-				sta->beacon_rate = 1;
+				sta->beacon_rate = 2;
 			} else {
-				sta->beacon_rate = 0;
+				sta->beacon_rate = 1;
 			}
 
 			log << *sta->time << "\t";
 			log <<  sta->rssi << "\t";
-			log <<  sta->shortVar << "\t";
+			log <<  sta->shortVar << "\t";				
 
 			_sta_list.push_back(sta);
 		}
-		else {					// list not empty, so lookup
-						
-			if (duplicate) {				// if list seen before
-				duplicate->time->set_now();
-				duplicate->rssi = sta->rssi;
-
-				keepTrack(*duplicate);
-				getShortVariance(*duplicate, 2);
-				if (is_beacon) 
-					duplicate->beacon_rate++;
-
-				log << *duplicate->time	<< "\t";
-				log <<  duplicate->rssi	<< "\t";
-				log <<  duplicate->shortVar  << "\t";
-
-				if (duplicate->flag == 1) {	// once a sec print these
-
-					log << duplicate->longVar << "\t";
-					log << duplicate->_ewma.unparse() << "\t";
-					log << duplicate->beacon_rate << "\t";
-					
-					duplicate->beacon_rate = 0;
-					duplicate->flag = 0;
-				}
-			}
-			else if (is_beacon) {					// else if not seen before
-				sta->time = new Timestamp(Timestamp::now());
-				sta->first_run = 1;
-				sta->shortVar = 0;
-
-				keepTrack(*sta);
-				if (is_beacon) {
-					sta->beacon_rate = 1;
-				} else {
-					sta->beacon_rate = 0;
-				}
-
-				log << *sta->time << "\t";
-				log <<  sta->rssi << "\t";
-				log <<  sta->shortVar << "\t";				
-
-				_sta_list.push_back(sta);
-			}
-		}
-		
-
-		log << "\n";
-
-		#if CLICK_USERLEVEL
-			logOutput(*sta, log);
-		#endif
 	}
-	output(0).push(p);
+	else {					// list is empty so add
+
+		goodcrc = 0;			// first run implied
+		badcrc = 0;			// so good time to set globals.
+		sta->salvaged = 0;
+		sta->jitter = 0;
+
+		sta->time = new Timestamp(Timestamp::now());
+		sta->first_run = 1;
+		sta->shortVar = 0;
+
+		keepTrack(*sta);
+		if (is_beacon) {
+			sta->beacon_rate = 2;
+		} else {
+			sta->beacon_rate = 1;
+		}
+
+		log << *sta->time << "\t";
+		log <<  sta->rssi << "\t";
+		log <<  sta->shortVar << "\t";				
+
+		_sta_list.push_back(sta);
+	}		
+
+	log << "\n";
+	#if CLICK_USERLEVEL
+	logOutput(*sta, log);
+	#endif
 	
+	push:
+	output(0).push(p);
+
 	end:
-		;	// do nothing
+	return;
 }
 
 void RogueDetect::logOutput(station &sta, StringAccum log) {
