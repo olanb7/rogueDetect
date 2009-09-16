@@ -53,7 +53,7 @@ public:
 	int badcrc, goodcrc, salvaged;							// flags
 	int beacon_attack, var_attack_high, var_attack_low, shortVar_flag;	// attack flags
 	uint16_t beacon_int; 
-	uint32_t jitter;
+	uint32_t jitter, avg_jitter;
 	u_int64_t mactime;
 	ewma_type _ewma;
 	};

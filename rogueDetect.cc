@@ -25,10 +25,6 @@
 # include <unistd.h>
 #endif
 
-/*#include <click/glue.hh>
-#include <clicknet/radiotap.h>
-#include <clicknet/llc.h>
-*/
 #define show_debug 0		// output debug messages from getStats funcion
 #define window 100 		// define window size in packets
 
@@ -65,9 +61,9 @@ void RogueDetect::cleanup (StationList &l) {
 
 	for (StationList::iterator sta = l.begin(); sta != l.end(); ++sta) {
 
-		sta->flag = 0;
+		sta->flag = 1;
 		sta->shortVar_flag = 0;
-		sta->beacon_rate = 0;
+		//sta->beacon_rate = 0;
 		sta->jitter = 0;
 		sta->salvaged = 0;
 		goodcrc = 0;
@@ -81,13 +77,13 @@ void RogueDetect::printStations(StationList &l) {
 	StringAccum sa, head;
 
 	Timestamp now = Timestamp::now();
-	//system("clear");
+	system("clear");
 
 	if (show_debug)
 		click_chatter("%s", debug.take_string().c_str());
 
-	head << "\nNo.\tMAC              \tBeacons\tJitter\tRSSI\tLast Packet\tEWMA  \t Variance (l & s) \n";
-	head <<   "---\t-----------------\t-------\t------\t----\t-----------\t------\t -----------------\n";
+	head << "\nNo.\tMAC              \tBeacons\tJitter\tRSSI\tLast Packet\tEWMA  \tVariance (l & s) \n";
+	head <<   "---\t-----------------\t-------\t------\t----\t-----------\t------\t-----------------\n";
 	click_chatter("%s", head.c_str());
 
 	for (StationList::iterator sta = l.begin(); sta != l.end(); ++sta, ++n) 	{
@@ -111,9 +107,10 @@ void RogueDetect::printStations(StationList &l) {
 			sa.adjust_length(len);
 
 			if (sta->beacon_rate == 0)
-				len = sprintf(sa.reserve(14), "n/a");
+				len = sprintf(sa.reserve(14), "\tn/a");
 			else
 				len = sprintf(sa.reserve(14), "\t%d us", (sta->jitter / sta->beacon_rate));
+
 			sa.adjust_length(len);
 
 			len = sprintf(sa.reserve(9), "\t%4d", sta->rssi);
@@ -148,11 +145,16 @@ void RogueDetect::printStations(StationList &l) {
 			sa << "\n";
 			}		
 	}
-	int total = badcrc + goodcrc;
-	double fer = (double) badcrc / (double) total;
-	int len;
-	len = sprintf(sa.reserve(20), "\nFER: %d / %d = %lf", badcrc, total, fer);
-	sa.adjust_length(len);
+
+	if (badcrc > 0) {
+		int total = badcrc + goodcrc;
+		if (total > 0) {
+			double fer = (double) badcrc / (double) total;
+			int len = sprintf(sa.reserve(20), "\nFER: %d / %d = %lf", badcrc, total, fer);
+			sa.adjust_length((int) len);
+		} else { sa << "No packets recieved!"; }
+	}
+
 	click_chatter("%s", sa.c_str());
 }
 
@@ -176,8 +178,6 @@ void RogueDetect::getStats (StationList &l) {
 	int error = 1; // beacon per second error
 	
 	for (StationList::iterator sta = l.begin(); sta != l.end(); ++sta) {
-
-		sta->flag = 1;
 
 		debug << "\n" << sta->mac->unparse().c_str();
 		getAverage(*sta, 100);
@@ -425,9 +425,6 @@ RogueDetect::push(int, Packet *p) {
 		struct station *saved = lookup(*sta, _sta_list);
 		if (saved) {
 			saved->salvaged++;					// only taking beacon rate
-			//salvaged++;
-		} else {
-			// beacon unsalvageable
 		}
 		p->kill();
 		goto end;
@@ -472,13 +469,15 @@ RogueDetect::push(int, Packet *p) {
 
 			keepTrack(*duplicate);
 			getShortVariance(*duplicate, 2);
+
 			if (is_beacon) {
 				duplicate->beacon_rate++;
 				if (duplicate->mactime) {		// beacon jitter check 
 					uint32_t jitter = (ceha->tsft - duplicate->mactime) % 102400;
 					if (jitter > 51200)
 						jitter = 102400 - jitter;
-					duplicate->jitter += jitter;
+					duplicate->avg_jitter += jitter;
+					duplicate->jitter = jitter;
 				}
 				duplicate->mactime = (u_int64_t) ceha->tsft;
 			}
@@ -488,16 +487,34 @@ RogueDetect::push(int, Packet *p) {
 						duplicate->mac->unparse_colon().c_str(), duplicate->rssi);
 			}
 
+			// time | rssi | shortVariance | Beacon Jitter| longVariance | RSSI EWMA | Beacon Rate
 			log << *duplicate->time	<< "\t";
 			log <<  duplicate->rssi	<< "\t";
 			log <<  duplicate->shortVar  << "\t";
 
-			if (duplicate->flag == 1) {			// once a sec print these
+			if (is_beacon && duplicate->jitter > 0)
+				log << (double) duplicate->jitter << "\t";
+			else
+				log << "NaN\t";
 
+			if (duplicate->flag == 1) {			// once a sec print these
 				log << duplicate->longVar << "\t";
 				log << duplicate->_ewma.unparse() << "\t";
 				log << duplicate->beacon_rate << "\t";
+
+				if (duplicate->beacon_rate > 0) {
+					duplicate->avg_jitter = duplicate->avg_jitter / duplicate->beacon_rate;
+					log << duplicate->avg_jitter << "\t";
+				} else {
+					duplicate->avg_jitter = 0; 
+					log << "NaN\t";
+				}
+							
+				duplicate->flag = 0;
+				duplicate->beacon_rate = 0;
 			}
+			
+			
 		}
 		else {
 
